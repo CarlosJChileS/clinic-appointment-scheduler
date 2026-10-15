@@ -1,0 +1,8 @@
+node_modules/
+**/dist/
+**/.angular/
+agendamiento_clinico.db
+*.sqlite
+*.sqlite3
+.env
+*.tsbuildinfo
