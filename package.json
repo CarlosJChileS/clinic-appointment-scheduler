@@ -1,10 +1,14 @@
 {
   "name": "clinic-appointment-scheduler",
   "private": true,
-  "workspaces": ["apps/api", "apps/web"],
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
   "scripts": {
     "start:api": "npm run start:dev -w @clinic/api",
     "start:web": "npm start -w clinic-web",
-    "build": "npm run build -w @clinic/api && npm run build -w clinic-web"
+    "build": "npm run build -w @clinic/api && npm run build -w clinic-web",
+    "seed:demo": "node scripts/seed-demo-data.mjs"
   }
 }
