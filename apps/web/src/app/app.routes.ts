@@ -5,7 +5,7 @@ import { authGuard, doctorGuard } from './auth.guard';
 
 export const routes: Routes = [
   { path: 'login', component: LoginPage },
-  { path: 'workspace/records', component: WorkspacePage, canActivate: [doctorGuard] },
+  { path: 'workspace/records', component: WorkspacePage, canActivate: [doctorGuard], data: { section: 'records' } },
   { path: 'workspace/:section', component: WorkspacePage, canActivate: [authGuard] },
   { path: '', pathMatch: 'full', redirectTo: 'login' },
   { path: '**', redirectTo: 'login' },

@@ -74,6 +74,17 @@ export class ClinicalRecord {
   @Column({ nullable: true }) embarazo_lactancia: string;
   @Column({ nullable: true }) localizacion_lesion: string;
   @Column({ nullable: true }) tiempo_evolucion: string;
+  @Column({ type: 'text', nullable: true }) descripcion_sintomas: string;
+  @Column({ type: 'text', nullable: true }) sintomas_asociados: string;
+  @Column({ type: 'text', nullable: true }) factores_desencadenantes: string;
+  @Column({ type: 'text', nullable: true }) evolucion_desde_ultima: string;
+  @Column({ type: 'text', nullable: true }) hallazgos_dermatologicos: string;
+  @Column({ type: 'text', nullable: true }) valoracion_clinica: string;
+  @Column({ type: 'text', nullable: true }) plan_tratamiento: string;
+  @Column({ type: 'text', nullable: true }) indicaciones_paciente: string;
+  @Column({ type: 'text', nullable: true }) estudios_solicitados: string;
+  @Column({ type: 'text', nullable: true }) resultados_estudios: string;
+  @Column({ nullable: true }) fecha_seguimiento: string;
   @Column({ type: 'text', nullable: true }) imagenes: string;
   @OneToMany(() => ClinicalPhotoConsent, consent => consent.record) consentimientos_fotograficos: ClinicalPhotoConsent[];
 }

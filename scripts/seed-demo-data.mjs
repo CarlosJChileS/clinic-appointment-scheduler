@@ -82,9 +82,11 @@ const transaction = db.transaction(() => {
     ['Revisión de cuidado facial ficticia','Sin antecedentes en el dato de ejemplo.','Sin medicación en el dato de ejemplo.','Dato de prueba.','No aplica · dato de demostración.','Contenido ilustrativo.','No es una indicación médica.'],
     ['Consulta de valoración ficticia','Dato de prueba, no clínico.','Dato de prueba, no clínico.','Dato de prueba.','No aplica · dato de demostración.','Nota de ejemplo para revisar la vista de historias clínicas.','Sin validez clínica.'],
   ];
+  const updateDemoEvidence = db.prepare(`UPDATE historia_clinica SET descripcion_sintomas=?,sintomas_asociados=?,factores_desencadenantes=?,evolucion_desde_ultima=?,hallazgos_dermatologicos=?,valoracion_clinica=?,plan_tratamiento=?,indicaciones_paciente=?,estudios_solicitados=?,resultados_estudios=?,fecha_seguimiento=? WHERE paciente_id=?`);
   for (let i=0;i<5;i++) {
     const apptIndex = i;
     insertRecord.run(patientIds[i],appointmentIds[apptIndex],dateOffset(appointments[apptIndex][1]),...notes[i],'[]','Dato ficticio de demostración; alergias no verificadas.','Antecedentes de ejemplo, sin validez clínica.','No disponible en este dato ilustrativo.','Sin procedimientos previos registrados en esta muestra.','Rutina ilustrativa, no recomendación de uso.',['Mixta','Grasa','Sensible','Seca','Normal'][i],'','Exposición solar de ejemplo; protección no documentada.','','','Zona de ejemplo','Dato ilustrativo, no clínico.');
+    updateDemoEvidence.run('Relato ficticio para mostrar el registro de consulta.','Síntoma ilustrativo; no representa un caso real.','Sin datos clínicos reales.','Seguimiento de demostración; no usar para decisiones de salud.','Hallazgo inventado para visualizar la ficha, sin valor diagnóstico.','Valoración de muestra; no constituye una opinión médica.','Plan ficticio exclusivamente para revisar la interfaz.','Indicaciones de muestra; no aplicar a personas reales.','Estudio ilustrativo no solicitado en práctica real.','Resultado ficticio, sin valor clínico.',dateOffset(21),patientIds[i]);
   }
 
   const insertCase = db.prepare(`INSERT INTO public_cases (title,description,images,consent,published) VALUES (?,?,?,0,0)`);
