@@ -133,14 +133,19 @@ html{scroll-padding-top:88px}
   @UseGuards(JwtGuard) @Post('api/branches') async createBranch(@Body() body: Partial<Branch>) { if (!body.nombre?.trim()) throw new BadRequestException('Escribe el nombre de la sucursal.'); return this.branches.save(this.branches.create({ ...body, nombre: body.nombre.trim(), activa: true })); }
   @UseGuards(JwtGuard) @Patch('api/branches/:id') async updateBranch(@Param('id') id: string, @Body() body: Partial<Branch>) { const branch = await this.branches.findOneBy({ id: +id }); if (!branch) throw new NotFoundException(); return this.branches.save({ ...branch, ...body, nombre: body.nombre?.trim() || branch.nombre }); }
   @UseGuards(JwtGuard) @Get('api/appointments') listAppointments() { return this.appointments.find({ order: { fecha: 'ASC', hora: 'ASC' } }); }
-  private async validateAppointment(body:Partial<Appointment>,excludeId?:number){
+  private async validateAppointment(body:Partial<Appointment>,excludeId?:number,requireDetails=false){
     if(!body.paciente_id||!await this.patients.findOneBy({id:Number(body.paciente_id)}))throw new BadRequestException('Selecciona un paciente existente.');
     if(!body.sucursal_id||!await this.branches.findOneBy({id:Number(body.sucursal_id),activa:true}))throw new BadRequestException('Selecciona una sucursal activa.');
     if(!/^\d{4}-\d{2}-\d{2}$/.test(body.fecha??'')||!/^([01]\d|2[0-3]):[0-5]\d$/.test(body.hora??''))throw new BadRequestException('Revisa la fecha y la hora de la cita.');
-    const duplicate=await this.appointments.findOneBy({fecha:body.fecha!,hora:body.hora!,estado:'Programada'});
-    if(duplicate&&duplicate.id!==excludeId)throw new BadRequestException('Ese horario ya está ocupado. Elige otro espacio disponible.');
+    if(requireDetails||body.tipo_consulta!==undefined){if(!['Consulta inicial','Control','Procedimiento','Valoración estética','Otro'].includes(body.tipo_consulta??''))throw new BadRequestException('Selecciona el tipo de consulta.');}
+    if(requireDetails||body.motivo_consulta!==undefined){if(!body.motivo_consulta?.trim()||body.motivo_consulta.trim().length>500)throw new BadRequestException('Escribe el motivo de consulta (máximo 500 caracteres).');}
+    if((requireDetails||body.duracion_minutos!==undefined)&&![15,20,30,45,60,90].includes(Number(body.duracion_minutos)))throw new BadRequestException('Selecciona una duración válida.');
+    const start=Number(body.hora!.slice(0,2))*60+Number(body.hora!.slice(3,5));const duration=Number(body.duracion_minutos)||30;
+    const sameDay=await this.appointments.find({where:{fecha:body.fecha!,estado:'Programada'}});
+    const overlaps=sameDay.some(item=>{if(item.id===excludeId)return false;const existingStart=Number(item.hora.slice(0,2))*60+Number(item.hora.slice(3,5));return start<existingStart+(item.duracion_minutos||30)&&existingStart<start+duration});
+    if(overlaps)throw new BadRequestException('Ese horario se cruza con otra cita. Elige otro espacio disponible.');
   }
-  @UseGuards(JwtGuard) @Post('api/appointments') async createAppointment(@Body() body: Partial<Appointment>) { await this.validateAppointment(body); return this.appointments.save(this.appointments.create({...body,paciente_id:Number(body.paciente_id),sucursal_id:Number(body.sucursal_id),estado:'Programada'})); }
+  @UseGuards(JwtGuard) @Post('api/appointments') async createAppointment(@Body() body: Partial<Appointment>) { await this.validateAppointment(body,undefined,true); return this.appointments.save(this.appointments.create({...body,motivo_consulta:body.motivo_consulta?.trim(),paciente_id:Number(body.paciente_id),sucursal_id:Number(body.sucursal_id),duracion_minutos:Number(body.duracion_minutos),estado:'Programada'})); }
   @UseGuards(JwtGuard) @Post('api/appointments/:id/images') async addAppointmentImages(@Param('id') id: string, @Body() body: { images: { name: string; type: string; data: string }[] }) {
     const appointment = await this.appointments.findOneBy({ id: +id });
     if (!appointment) throw new NotFoundException();
@@ -175,7 +180,7 @@ html{scroll-padding-top:88px}
     ]);
     return req.user.role==='doctor'?{appointments,records}:{appointments:appointments.map(({imagenes,...appointment})=>appointment)};
   }
-  @UseGuards(JwtGuard) @Patch('api/appointments/:id') async updateAppointment(@Param('id') id: string, @Body() body: Partial<Appointment>) { const current=await this.appointments.findOneBy({id:+id});if(!current)throw new NotFoundException();const merged={...current,...body};if(body.estado&&!['Programada','Atendida','Cancelada'].includes(body.estado))throw new BadRequestException('Estado de cita no válido.');if(body.paciente_id!==undefined||body.sucursal_id!==undefined||body.fecha!==undefined||body.hora!==undefined||body.estado==='Programada')await this.validateAppointment(merged,+id);return this.appointments.save({...current,...Object.fromEntries(['paciente_id','sucursal_id','fecha','hora','ubicacion','descripcion','estado'].filter(key=>body[key]!==undefined).map(key=>[key,body[key]]))}); }
+  @UseGuards(JwtGuard) @Patch('api/appointments/:id') async updateAppointment(@Param('id') id: string, @Body() body: Partial<Appointment>) { const current=await this.appointments.findOneBy({id:+id});if(!current)throw new NotFoundException();const merged={...current,...body};if(body.estado&&!['Programada','Atendida','Cancelada'].includes(body.estado))throw new BadRequestException('Estado de cita no válido.');if(body.paciente_id!==undefined||body.sucursal_id!==undefined||body.fecha!==undefined||body.hora!==undefined||body.estado==='Programada'||body.tipo_consulta!==undefined||body.motivo_consulta!==undefined||body.duracion_minutos!==undefined)await this.validateAppointment(merged,+id);return this.appointments.save({...current,...Object.fromEntries(['paciente_id','sucursal_id','fecha','hora','ubicacion','tipo_consulta','motivo_consulta','duracion_minutos','descripcion','estado'].filter(key=>body[key]!==undefined).map(key=>[key,key==='motivo_consulta'&&typeof body[key]==='string'?body[key].trim():body[key]]))}); }
   @UseGuards(JwtGuard) @Delete('api/appointments/:id') async deleteAppointment(@Param('id') id: string) { await this.appointments.delete(+id); return { ok: true }; }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Get('api/records') listRecords() { return this.records.find({ relations:{consentimientos_fotograficos:true},order: { fecha: 'DESC' } }); }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Post('api/records') async createRecord(@Body() body: Partial<ClinicalRecord>) {

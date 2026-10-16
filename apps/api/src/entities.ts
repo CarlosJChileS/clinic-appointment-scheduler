@@ -45,6 +45,9 @@ export class Appointment {
   @Column({ nullable: true }) descripcion: string;
   @Column({ type: 'text', nullable: true }) imagenes: string;
   @Column({ nullable: true }) ubicacion: string;
+  @Column({ nullable: true }) tipo_consulta: string;
+  @Column({ nullable: true }) motivo_consulta: string;
+  @Column({ type: 'integer', nullable: true }) duracion_minutos: number;
   @Column({ nullable: true }) sucursal_id: number;
   @Column({ default: 'Programada' }) estado: string;
 }
