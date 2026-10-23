@@ -301,7 +301,12 @@ img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq
     return this.requireProcedure(id,String(current.id));
   }
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Patch('api/records/:id/procedures/:procedureId') async updateProcedure(@Param('id') id:string,@Param('procedureId') procedureId:string,@Body() body:any){return this.saveProcedure(id,body,await this.requireProcedure(id,procedureId));}
-  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Delete('api/records/:id/procedures/:procedureId') async deleteProcedure(@Param('id') id:string,@Param('procedureId') procedureId:string){await this.requireProcedure(id,procedureId);await this.repo(DermatologyProcedure).delete(+procedureId);return {ok:true};}
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Delete('api/records/:id/procedures/:procedureId') async deleteProcedure(@Param('id') id:string,@Param('procedureId') procedureId:string){
+    await this.requireProcedure(id,procedureId);
+    const result=await this.repo(DermatologyProcedure).createQueryBuilder().delete().where('id = :procedureId AND record_id = :recordId',{procedureId:+procedureId,recordId:+id}).andWhere('NOT EXISTS (SELECT 1 FROM consentimientos_procedimientos c WHERE c.procedimiento_id = :procedureId AND c.record_id = :recordId)').execute();
+    if(!result.affected)throw new BadRequestException('No puedes eliminar un procedimiento con consentimiento registrado o pendiente. Puedes cambiar su estado.');
+    return {ok:true};
+  }
 
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Get('api/records/:id/procedures/:procedureId/consents') async listProcedureConsents(@Param('id') id:string,@Param('procedureId') procedureId:string){await this.requireProcedure(id,procedureId);return this.repo(ProcedureConsent).findBy({record_id:+id,procedimiento_id:+procedureId});}
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/records/:id/procedures/:procedureId/consents') async createProcedureConsent(@Param('id') id:string,@Param('procedureId') procedureId:string,@Body() body:any,@Req() req:any){

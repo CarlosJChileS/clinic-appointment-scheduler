@@ -268,6 +268,7 @@ test('first pending consent upload freezes procedure scope before its file finis
   const responses:number[]=[];for(const edit of [{tipo:'Otro'},{fecha:'2026-10-24'},{zona:'Cara'},{detalles:'Alcance diferente'}])responses.push((await api(path,'PATCH',edit)).status);
   assert.deepEqual(responses,[400,400,400,400]);
   const pending=await api(path+'/consents');assert.equal(pending.body.length,1);assert.equal(pending.body[0].documento_firmado,'');
+  assert.equal((await api(path,'DELETE')).status,400);assert.equal((await api(path+'/consents')).body[0].id,pending.body[0].id);
   assert.equal((await api(path+`/consents/${pending.body[0].id}/confirm`,'PATCH',{fecha_confirmacion:original.fecha})).status,400);
   assert.equal((await api(path,'PATCH',{estado:'Realizado'})).status,400);
   resume.resolve();const result=await upload;assert.equal(result.status,201);assert.ok(result.body.documento_firmado);
@@ -309,4 +310,15 @@ test('first consent reservation rejects a scope edit that commits before its ins
   resume.resolve();assert.equal((await upload).status,400);assert.equal((await api(path+'/consents')).body.length,0);
   assert.equal((await db.getRepository(entities.DermatologyProcedure).findOneByOrFail({id:procedure.body.id})).zona,'Cara');
  }finally{resume.resolve();await upload;context.mock.restoreAll();}
+});
+
+test('procedure deletion preserves signed consent evidence and allows procedures without consent',async()=>{
+ const r=await record();const path=`records/${r.id}/procedures`;
+ const procedure=await api(path,'POST',{tipo:'Biopsia',fecha:'2026-10-23',zona:'Brazo'});const url=path+'/'+procedure.body.id;
+ const consent=await api(url+'/consents','POST',procedureConsent);assert.equal(consent.status,201);
+ assert.equal((await api(url,'DELETE')).status,400);
+ assert.equal(await db.getRepository(entities.DermatologyProcedure).existsBy({id:procedure.body.id}),true);
+ assert.equal((await db.getRepository(entities.ProcedureConsent).findOneByOrFail({id:consent.body.id})).documento_firmado,consent.body.documento_firmado);
+ const withoutConsent=await api(path,'POST',{tipo:'Otro',fecha:'2026-10-23',zona:'Brazo'});assert.equal((await api(path+'/'+withoutConsent.body.id,'DELETE')).status,200);
+ assert.equal(await db.getRepository(entities.DermatologyProcedure).existsBy({id:withoutConsent.body.id}),false);
 });
