@@ -46,6 +46,7 @@ export class Appointment {
   @Column({ type: 'text', nullable: true }) imagenes: string;
   @Column({ nullable: true }) ubicacion: string;
   @Column({ nullable: true }) tipo_consulta: string;
+  @Column({ nullable: true }) tipo_consulta_otro: string;
   @Column({ nullable: true }) motivo_consulta: string;
   @Column({ type: 'integer', nullable: true }) duracion_minutos: number;
   @Column({ nullable: true }) sucursal_id: number;
@@ -88,6 +89,7 @@ export class ClinicalRecord {
   @Column({ type: 'text', nullable: true }) estudios_solicitados: string;
   @Column({ type: 'text', nullable: true }) resultados_estudios: string;
   @Column({ nullable: true }) fecha_seguimiento: string;
+  @Column({ nullable: true }) seguimiento_estado: string;
   @Column({ type: 'text', nullable: true }) imagenes: string;
   @OneToMany(() => ClinicalPhotoConsent, consent => consent.record) consentimientos_fotograficos: ClinicalPhotoConsent[];
 }
@@ -129,4 +131,86 @@ export class StoreProduct {
   @Column({nullable:true}) image_url:string;
   @Column({default:true}) active:boolean;
   @Column({type:'datetime',default:()=> 'CURRENT_TIMESTAMP'}) created_at:Date;
+}
+
+@Entity('tratamientos_dermatologicos')
+export class DermatologyTreatment {
+  @PrimaryGeneratedColumn() id:number;
+  @Column() record_id:number;
+  @Column() producto:string;
+  @Column({default:''}) concentracion:string;
+  @Column({default:''}) presentacion:string;
+  @Column({default:''}) cantidad:string;
+  @Column({default:''}) via:string;
+  @Column({default:''}) frecuencia:string;
+  @Column({default:''}) duracion:string;
+  @Column({type:'text',default:''}) indicaciones:string;
+  @ManyToOne(()=>ClinicalRecord,{onDelete:'CASCADE'}) @JoinColumn({name:'record_id'}) record:ClinicalRecord;
+}
+
+@Entity('procedimientos_dermatologicos')
+export class DermatologyProcedure {
+  @PrimaryGeneratedColumn() id:number;
+  @Column() record_id:number;
+  @Column() tipo:string;
+  @Column() fecha:string;
+  @Column({default:''}) zona:string;
+  @Column({type:'text',default:''}) detalles:string;
+  @Column({default:'Planificado'}) estado:string;
+  @Column({default:'No solicitada'}) biopsia_estado:string;
+  @Column({type:'text',default:''}) biopsia_resultado:string;
+  @Column({nullable:true}) biopsia_resultado_fecha:string;
+  @Column({nullable:true}) comunicacion_fecha:string;
+  @Column({default:''}) comunicacion_destinatario:string;
+  @Column({default:''}) comunicacion_canal:string;
+  @ManyToOne(()=>ClinicalRecord,{onDelete:'CASCADE'}) @JoinColumn({name:'record_id'}) record:ClinicalRecord;
+}
+
+@Entity('fotografias_clinicas')
+export class ClinicalPhoto {
+  @PrimaryGeneratedColumn() id:number;
+  @Column() record_id:number;
+  @Column() ruta:string;
+  @Column() vista:string;
+  @Column({default:''}) zona:string;
+  @Column() fecha_captura:string;
+  @ManyToOne(()=>ClinicalRecord,{onDelete:'CASCADE'}) @JoinColumn({name:'record_id'}) record:ClinicalRecord;
+}
+
+@Entity('consentimientos_procedimientos')
+export class ProcedureConsent {
+  @PrimaryGeneratedColumn() id:number;
+  @Column() record_id:number;
+  @Column() procedimiento_id:number;
+  @Column() firmante:string;
+  @Column() identificacion_firmante:string;
+  @Column({default:''}) representante:string;
+  @Column() fecha_conversacion:string;
+  @Column({type:'text'}) beneficios:string;
+  @Column({type:'text'}) riesgos:string;
+  @Column({type:'text'}) alternativas:string;
+  @Column() oportunidad_preguntas:boolean;
+  @Column() comprension_confirmada:boolean;
+  @Column() documento_firmado:string;
+  @Column() registrado_por:string;
+  @Column({type:'datetime',default:()=> 'CURRENT_TIMESTAMP'}) firmado_en:Date;
+  @Column({nullable:true}) fecha_confirmacion:string;
+  @Column({nullable:true}) confirmado_por:string;
+  @ManyToOne(()=>DermatologyProcedure,{onDelete:'CASCADE'}) @JoinColumn({name:'procedimiento_id'}) procedimiento:DermatologyProcedure;
+  @ManyToOne(()=>ClinicalRecord,{onDelete:'CASCADE'}) @JoinColumn({name:'record_id'}) record:ClinicalRecord;
+}
+
+@Entity('consentimientos_publicacion')
+export class PublicationConsent {
+  @PrimaryGeneratedColumn() id:number;
+  @Column() case_id:number;
+  @Column() firmante:string;
+  @Column({default:''}) identificacion_firmante:string;
+  @Column({default:''}) representante:string;
+  @Column() documento_firmado:string;
+  @Column() registrado_por:string;
+  @Column({type:'datetime',default:()=> 'CURRENT_TIMESTAMP'}) firmado_en:Date;
+  @Column({type:'datetime',nullable:true}) revocado_en:Date;
+  @Column({nullable:true}) revocado_por:string;
+  @ManyToOne(()=>PublicCase,{onDelete:'CASCADE'}) @JoinColumn({name:'case_id'}) case:PublicCase;
 }

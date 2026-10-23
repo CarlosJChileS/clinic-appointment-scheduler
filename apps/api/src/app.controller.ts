@@ -7,7 +7,7 @@ import { PROJECT_ROOT } from './project-root';
 import { JwtService } from '@nestjs/jwt';
 import { IsNull, Repository } from 'typeorm';
 import { Request, Response } from 'express';
-import { Appointment, Branch, ClinicalPhotoConsent, ClinicalRecord, Patient, PublicCase, StoreProduct } from './entities';
+import { Appointment, Branch, ClinicalPhotoConsent, ClinicalRecord, Patient, PublicCase, StoreProduct, DermatologyTreatment, DermatologyProcedure, ClinicalPhoto, ProcedureConsent, PublicationConsent } from './entities';
 import { JwtGuard } from './auth/jwt.guard';
 import { Roles } from './auth/roles.decorator';
 import { RolesGuard } from './auth/roles.guard';
@@ -59,10 +59,13 @@ html{scroll-padding-top:88px}
 .faq-list details{transition:background-color .2s,padding .2s}.faq-list details[open]{padding-left:15px;padding-right:15px;background:#f5f8f6}.faq-list summary:hover{color:#367e89}.faq-list summary:after{width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:#edf5f2;font-size:20px}.closing{position:relative;overflow:hidden}.closing:after{content:"✳";position:absolute;right:32%;top:-55px;font-size:180px;line-height:1;color:#dcebe6;opacity:.6;pointer-events:none}.closing>div,.closing>a{position:relative;z-index:1}.closing>div{max-width:700px}.closing .button{padding-inline:26px}footer{margin-top:28px}
 @media(max-width:800px){.services#especialidades{padding:58px 22px 65px}.services#especialidades .section-heading,.services#especialidades .service-list{margin-left:0;margin-right:0}.service-list article:after{display:none}.public-case>img{height:245px}.closing:after{right:18%;font-size:130px}}
 @media(max-width:520px){html{scroll-padding-top:20px}.hero-copy .kicker{font-size:9px}.service-list article,.service-list article+article{border-radius:7px}.cases-section,.store-section{padding-top:50px}.public-case>img{height:250px}.closing:after{right:-6%;top:-15px;font-size:100px}.closing .button{min-height:48px}}
+/* Responsive intrinsic sizing: keep content within the viewport. */
+img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq>*{min-width:0}h1,h2,h3,p,a,strong{overflow-wrap:anywhere}.hero-copy .kicker{max-width:100%;white-space:normal}.aqua-disc{max-width:88%}.image-caption{max-width:95%;white-space:normal;text-align:center}.top{gap:20px}.top .brand{min-width:0}.top nav{flex-wrap:wrap;justify-content:flex-end}
+@media(max-width:800px){.hero,.editorial-gallery,.experience,.care-steps,.faq{grid-template-columns:minmax(0,1fr)}.services#especialidades{margin-inline:0}.top{flex-wrap:wrap}.top nav{width:100%;justify-content:flex-start;gap:12px;flex-wrap:wrap}.top nav a:first-child,.top nav a:nth-child(2){display:inline-flex}.top nav a{min-height:44px;align-items:center}.hero h1{font-size:clamp(36px,10vw,52px)}.hero-art{min-width:0}.trust{align-items:flex-start}.dot{flex-shrink:0}.closing .button{max-width:100%}}
 `);
   }
 
-  @Get('api/public-cases') listPublicCases() { return this.cases.find({ where: { consent: true, published: true }, order: { created_at: 'DESC' } }); }
+  @Get('api/public-cases') listPublicCases() { return this.cases.createQueryBuilder('c').where('c.consent = :yes AND c.published = :yes', {yes:true}).andWhere("EXISTS (SELECT 1 FROM consentimientos_publicacion pc WHERE pc.case_id = c.id AND pc.revocado_en IS NULL AND TRIM(pc.documento_firmado) <> '')").orderBy('c.created_at','DESC').getMany(); }
   @Get('api/public-products') listPublicProducts(){return this.products.find({where:{active:true},order:{created_at:'DESC'}})}
   @UseGuards(JwtGuard) @Get('api/products') listProducts(){return this.products.find({order:{created_at:'DESC'}})}
   @UseGuards(JwtGuard) @Post('api/products') async createProduct(@Body() body:Partial<StoreProduct>){if(!body.name?.trim())throw new BadRequestException('Escribe el nombre del producto.');return this.products.save(this.products.create({name:body.name.trim(),description:body.description??'',price:body.price??'',active:body.active!==false}))}
@@ -72,13 +75,14 @@ html{scroll-padding-top:88px}
   @UseGuards(JwtGuard) @Get('api/cases') listCases() { return this.cases.find({ order: { created_at: 'DESC' } }); }
   @UseGuards(JwtGuard) @Post('api/cases') async createCase(@Body() body: Partial<PublicCase>) {
     if (!body.title?.trim()) throw new BadRequestException('Escribe el nombre del caso.');
-    return this.cases.save(this.cases.create({ title: body.title.trim(), description: body.description ?? '', images: '[]', consent: Boolean(body.consent), published: Boolean(body.published && body.consent) }));
+    return this.cases.save(this.cases.create({ title: body.title.trim(), description: body.description ?? '', images: '[]', consent: Boolean(body.consent), published: false }));
   }
   @UseGuards(JwtGuard) @Patch('api/cases/:id') async updateCase(@Param('id') id: string, @Body() body: Partial<PublicCase>) {
     const item = await this.cases.findOneBy({ id: +id });
     if (!item) throw new NotFoundException();
-    Object.assign(item, body);
+    for(const key of ['title','description','consent','published'])if(body[key]!==undefined)item[key]=body[key];
     if (!item.consent) item.published = false;
+    if(item.published && !await this.activePublicationConsent(item.id))throw new BadRequestException('Adjunta primero la autorización firmada de publicación.');
     return this.cases.save(item);
   }
   @UseGuards(JwtGuard) @Delete('api/cases/:id') async deleteCase(@Param('id') id: string) { const item = await this.cases.findOneBy({ id: +id }); if (!item) throw new NotFoundException(); await this.cases.remove(item); return { ok: true }; }
@@ -137,6 +141,7 @@ html{scroll-padding-top:88px}
     if(!body.paciente_id||!await this.patients.findOneBy({id:Number(body.paciente_id)}))throw new BadRequestException('Selecciona un paciente existente.');
     if(!body.sucursal_id||!await this.branches.findOneBy({id:Number(body.sucursal_id),activa:true}))throw new BadRequestException('Selecciona una sucursal activa.');
     if(!/^\d{4}-\d{2}-\d{2}$/.test(body.fecha??'')||!/^([01]\d|2[0-3]):[0-5]\d$/.test(body.hora??''))throw new BadRequestException('Revisa la fecha y la hora de la cita.');
+    if(body.tipo_consulta==='Otro' && (typeof body.tipo_consulta_otro!=='string'||!body.tipo_consulta_otro.trim()||body.tipo_consulta_otro.trim().length>500))throw new BadRequestException('Describe el tipo de consulta Otro (máximo 500 caracteres).');
     if(requireDetails||body.tipo_consulta!==undefined){if(!['Consulta inicial','Control','Procedimiento','Valoración estética','Otro'].includes(body.tipo_consulta??''))throw new BadRequestException('Selecciona el tipo de consulta.');}
     if(requireDetails||body.motivo_consulta!==undefined){if(!body.motivo_consulta?.trim()||body.motivo_consulta.trim().length>500)throw new BadRequestException('Escribe el motivo de consulta (máximo 500 caracteres).');}
     if((requireDetails||body.duracion_minutos!==undefined)&&![15,20,30,45,60,90].includes(Number(body.duracion_minutos)))throw new BadRequestException('Selecciona una duración válida.');
@@ -145,7 +150,7 @@ html{scroll-padding-top:88px}
     const overlaps=sameDay.some(item=>{if(item.id===excludeId)return false;const existingStart=Number(item.hora.slice(0,2))*60+Number(item.hora.slice(3,5));return start<existingStart+(item.duracion_minutos||30)&&existingStart<start+duration});
     if(overlaps)throw new BadRequestException('Ese horario se cruza con otra cita. Elige otro espacio disponible.');
   }
-  @UseGuards(JwtGuard) @Post('api/appointments') async createAppointment(@Body() body: Partial<Appointment>) { await this.validateAppointment(body,undefined,true); return this.appointments.save(this.appointments.create({...body,motivo_consulta:body.motivo_consulta?.trim(),paciente_id:Number(body.paciente_id),sucursal_id:Number(body.sucursal_id),duracion_minutos:Number(body.duracion_minutos),estado:'Programada'})); }
+  @UseGuards(JwtGuard) @Post('api/appointments') async createAppointment(@Body() body: Partial<Appointment>) { await this.validateAppointment(body,undefined,true); return this.appointments.save(this.appointments.create({...body,id:undefined,imagenes:'[]',tipo_consulta_otro:body.tipo_consulta==='Otro'?body.tipo_consulta_otro?.trim():undefined,motivo_consulta:body.motivo_consulta?.trim(),paciente_id:Number(body.paciente_id),sucursal_id:Number(body.sucursal_id),duracion_minutos:Number(body.duracion_minutos),estado:'Programada'})); }
   @UseGuards(JwtGuard) @Post('api/appointments/:id/images') async addAppointmentImages(@Param('id') id: string, @Body() body: { images: { name: string; type: string; data: string }[] }) {
     const appointment = await this.appointments.findOneBy({ id: +id });
     if (!appointment) throw new NotFoundException();
@@ -178,41 +183,142 @@ html{scroll-padding-top:88px}
       this.appointments.find({where:{paciente_id:patientId},order:{fecha:'DESC',hora:'DESC'}}),
       this.records.find({where:{paciente_id:patientId},relations:{consentimientos_fotograficos:true},order:{fecha:'DESC',id:'DESC'}}),
     ]);
-    return req.user.role==='doctor'?{appointments,records}:{appointments:appointments.map(({imagenes,...appointment})=>appointment)};
+    return req.user.role==='doctor'?{appointments,records:records.map(record=>this.normalizeRecord(record))}:{appointments:appointments.map(({imagenes,...appointment})=>appointment)};
   }
-  @UseGuards(JwtGuard) @Patch('api/appointments/:id') async updateAppointment(@Param('id') id: string, @Body() body: Partial<Appointment>) { const current=await this.appointments.findOneBy({id:+id});if(!current)throw new NotFoundException();const merged={...current,...body};if(body.estado&&!['Programada','Atendida','Cancelada'].includes(body.estado))throw new BadRequestException('Estado de cita no válido.');if(body.paciente_id!==undefined||body.sucursal_id!==undefined||body.fecha!==undefined||body.hora!==undefined||body.estado==='Programada'||body.tipo_consulta!==undefined||body.motivo_consulta!==undefined||body.duracion_minutos!==undefined)await this.validateAppointment(merged,+id);return this.appointments.save({...current,...Object.fromEntries(['paciente_id','sucursal_id','fecha','hora','ubicacion','tipo_consulta','motivo_consulta','duracion_minutos','descripcion','estado'].filter(key=>body[key]!==undefined).map(key=>[key,key==='motivo_consulta'&&typeof body[key]==='string'?body[key].trim():body[key]]))}); }
+  @UseGuards(JwtGuard) @Patch('api/appointments/:id') async updateAppointment(@Param('id') id: string, @Body() body: Partial<Appointment>) { const current=await this.appointments.findOneBy({id:+id});if(!current)throw new NotFoundException();const merged={...current,...body};if(body.estado&&!['Programada','Atendida','Cancelada'].includes(body.estado))throw new BadRequestException('Estado de cita no válido.');if(body.paciente_id!==undefined||body.sucursal_id!==undefined||body.fecha!==undefined||body.hora!==undefined||body.estado==='Programada'||body.tipo_consulta!==undefined||body.tipo_consulta_otro!==undefined||body.motivo_consulta!==undefined||body.duracion_minutos!==undefined)await this.validateAppointment(merged,+id);return this.appointments.save({...current,...Object.fromEntries(['paciente_id','sucursal_id','fecha','hora','ubicacion','tipo_consulta','tipo_consulta_otro','motivo_consulta','duracion_minutos','descripcion','estado'].filter(key=>body[key]!==undefined).map(key=>[key,(key==='motivo_consulta'||key==='tipo_consulta_otro')&&typeof body[key]==='string'?body[key].trim():body[key]]))}); }
   @UseGuards(JwtGuard) @Delete('api/appointments/:id') async deleteAppointment(@Param('id') id: string) { await this.appointments.delete(+id); return { ok: true }; }
-  @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Get('api/records') listRecords() { return this.records.find({ relations:{consentimientos_fotograficos:true},order: { fecha: 'DESC' } }); }
+  @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Get('api/records') async listRecords() { return (await this.records.find({ relations:{consentimientos_fotograficos:true},order: { fecha: 'DESC' } })).map(record=>this.normalizeRecord(record)); }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Post('api/records') async createRecord(@Body() body: Partial<ClinicalRecord>) {
-    if(!body.paciente_id||!await this.patients.findOneBy({id:Number(body.paciente_id)}))throw new BadRequestException('Selecciona un paciente existente.');
-    if(body.cita_id){const appointment=await this.appointments.findOneBy({id:Number(body.cita_id)});if(!appointment||appointment.paciente_id!==Number(body.paciente_id))throw new BadRequestException('La cita no corresponde al paciente seleccionado.')}
-    if(!/^\d{4}-\d{2}-\d{2}$/.test(body.fecha??''))throw new BadRequestException('Selecciona una fecha válida.');
-    if(body.fecha_seguimiento&& !/^\d{4}-\d{2}-\d{2}$/.test(body.fecha_seguimiento))throw new BadRequestException('Selecciona una fecha de seguimiento válida.');
-    const {id,imagenes,...record}=body;
-    return this.records.save(this.records.create({...record,imagenes:'[]'}));
+    if(body.cita_id)return (await this.createLinkedRecord(String(body.cita_id),body)).record;
+    await this.validateRecord(body);
+    return this.records.save(this.records.create({...this.recordFields(body),imagenes:'[]',seguimiento_estado:body.seguimiento_estado||'Pendiente'}));
+  }
+  @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Post('api/appointments/:id/record') async createLinkedRecord(@Param('id') id:string,@Body() body:Partial<ClinicalRecord>){
+    return this.records.manager.connection.transaction(async manager=>{
+      const appointments=manager.getRepository(Appointment),records=manager.getRepository(ClinicalRecord);
+      const appointment=await appointments.findOneBy({id:this.numericId(id)});
+      if(!appointment)throw new NotFoundException();
+      if(appointment.estado==='Cancelada'||appointment.paciente_id!==Number(body.paciente_id)||body.cita_id&&Number(body.cita_id)!==appointment.id)throw new BadRequestException('La cita no corresponde al paciente seleccionado o está cancelada.');
+      if(await records.existsBy({cita_id:appointment.id}))throw new BadRequestException('La cita ya tiene una evolución.');
+      await this.validateRecord(body);
+      const record=await records.save(records.create({...this.recordFields(body),cita_id:appointment.id,imagenes:'[]',seguimiento_estado:body.seguimiento_estado||'Pendiente'}));
+      appointment.estado='Atendida';await appointments.save(appointment);
+      return {record,appointment};
+    });
   }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Post('api/records/:id/images') async addRecordImages(@Param('id') id:string,@Body() body:{images:{type:string;data:string}[]}) {
-    const record=await this.records.findOneBy({id:+id});if(!record)throw new NotFoundException();
-    const consent=await this.photoConsents.findOne({where:{record_id:+id,revocado_en:IsNull()}});if(!consent)throw new BadRequestException('Registra primero el consentimiento firmado para fotografías clínicas.');
-    if(!Array.isArray(body.images)||!body.images.length||body.images.length>10||body.images.some(image=>!/^image\/(jpeg|png|webp|gif)$/.test(image.type)||typeof image.data!=='string'))throw new BadRequestException('Selecciona hasta 10 imágenes JPG, PNG, WebP o GIF.');
-    const dir=join(PROJECT_ROOT,'uploads','records',id);await mkdir(dir,{recursive:true});const current:string[]=record.imagenes?JSON.parse(record.imagenes):[];
-    for(const image of body.images){const buffer=Buffer.from(image.data.replace(/^data:image\/[^;]+;base64,/,''),'base64');if(!buffer.length||buffer.length>5*1024*1024)throw new BadRequestException('Cada imagen debe pesar máximo 5 MB.');const filename=`${randomUUID()}.${image.type.split('/')[1].replace('jpeg','jpg')}`;await writeFile(join(dir,filename),buffer,{flag:'wx'});current.push(`/api/media/records/${id}/${filename}`)}
-    record.imagenes=JSON.stringify(current);return this.records.save(record);
+    await this.uploadPhotos(id,body);
+    return this.records.findOneByOrFail({id:this.numericId(id)});
   }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Post('api/records/:id/photo-consents') async createPhotoConsent(@Param('id') id:string,@Body() body:{firmante:string;identificacion_firmante?:string;representante?:string;firmado:boolean;type:string;data:string},@Req() req:Request & {user:{sub:string}}){
-    const record=await this.records.findOneBy({id:+id});if(!record)throw new NotFoundException();
-    if(!body.firmado||!body.firmante?.trim()||!/^application\/pdf$|^image\/(jpeg|png|webp)$/.test(body.type)||typeof body.data!=='string')throw new BadRequestException('Indica quién firmó y adjunta la copia firmada en PDF o imagen.');
-    const buffer=Buffer.from(body.data.replace(/^data:[^;]+;base64,/,''),'base64');if(!buffer.length||buffer.length>10*1024*1024)throw new BadRequestException('El documento firmado debe pesar máximo 10 MB.');
-    const ext=body.type==='application/pdf'?'pdf':body.type.split('/')[1].replace('jpeg','jpg');const dir=join(PROJECT_ROOT,'uploads','consents',id);await mkdir(dir,{recursive:true});const filename=`${randomUUID()}.${ext}`;await writeFile(join(dir,filename),buffer,{flag:'wx'});
-    const consent=this.photoConsents.create();Object.assign(consent,{paciente_id:record.paciente_id,record_id:record.id,firmante:body.firmante.trim(),identificacion_firmante:body.identificacion_firmante?.trim()||null,representante:body.representante?.trim()||null,documento_firmado:`/api/media/consents/${id}/${filename}`,registrado_por:req.user.sub,record});return this.photoConsents.save(consent);
+    const record=await this.requireRecord(id);this.validateSigner(body);
+    return this.withUpload('consents',id,body,async documento_firmado=>this.photoConsents.save(this.photoConsents.create({paciente_id:record.paciente_id,record_id:record.id,firmante:body.firmante.trim(),identificacion_firmante:body.identificacion_firmante?.trim()||'',representante:body.representante?.trim()||'',documento_firmado,registrado_por:req.user.sub})));
   }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Get('api/records/:id/photo-consents') async listPhotoConsents(@Param('id') id:string){if(!await this.records.findOneBy({id:+id}))throw new NotFoundException();return this.photoConsents.find({where:{record_id:+id},order:{firmado_en:'DESC'}})}
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Patch('api/records/:id/photo-consents/:consentId/revoke') async revokePhotoConsent(@Param('id') id:string,@Param('consentId') consentId:string,@Req() req:Request & {user:{sub:string}}){const consent=await this.photoConsents.findOneBy({id:+consentId,record_id:+id});if(!consent)throw new NotFoundException();if(!consent.revocado_en){consent.revocado_en=new Date();consent.revocado_por=req.user.sub;}return this.photoConsents.save(consent)}
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Delete('api/records/:id/images') async removeRecordImage(@Param('id') id:string,@Body() body:{image:string}){
-    const record=await this.records.findOneBy({id:+id});if(!record)throw new NotFoundException();const images:string[]=record.imagenes?JSON.parse(record.imagenes):[];const prefix=`/api/media/records/${id}/`;
-    if(!images.includes(body.image)||!body.image.startsWith(prefix))throw new BadRequestException('La imagen no pertenece a esta historia.');
-    await unlink(join(PROJECT_ROOT,'uploads','records',id,body.image.slice(prefix.length)));record.imagenes=JSON.stringify(images.filter(image=>image!==body.image));return this.records.save(record);
+    const photo=await this.repo(ClinicalPhoto).findOneBy({record_id:this.numericId(id),ruta:body.image});if(!photo)throw new BadRequestException('Las fotografías anteriores se conservan como documentación clínica.');await this.deletePhoto(id,String(photo.id));return this.records.findOneByOrFail({id:+id});
   }
-  @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Patch('api/records/:id') async updateRecord(@Param('id') id: string, @Body() body: Partial<ClinicalRecord>) { const record=await this.records.findOneBy({id:+id});if(!record)throw new NotFoundException();if(body.fecha!==undefined&&!/^\d{4}-\d{2}-\d{2}$/.test(body.fecha))throw new BadRequestException('Selecciona una fecha válida.');if(body.fecha_seguimiento!==undefined&&body.fecha_seguimiento!==''&&!/^\d{4}-\d{2}-\d{2}$/.test(body.fecha_seguimiento))throw new BadRequestException('Selecciona una fecha de seguimiento válida.');const allowed=['fecha','motivo_consulta','antecedentes_enfermedades','medicamentos_habituales','habitos_nocivos','metodos_anticonceptivos','examen_fisico','diagnostico_definitivo','alergias','antecedentes_dermatologicos','antecedentes_familiares_dermatologicos','tratamientos_dermatologicos_previos','rutina_cuidado_piel','tipo_piel','fototipo','exposicion_solar','cicatrizacion_queloides','embarazo_lactancia','localizacion_lesion','tiempo_evolucion','descripcion_sintomas','sintomas_asociados','factores_desencadenantes','evolucion_desde_ultima','hallazgos_dermatologicos','valoracion_clinica','plan_tratamiento','indicaciones_paciente','estudios_solicitados','resultados_estudios','fecha_seguimiento'];for(const key of allowed)if(body[key]!==undefined)record[key]=body[key];return this.records.save(record); }
+  @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Patch('api/records/:id') async updateRecord(@Param('id') id:string,@Body() body:Partial<ClinicalRecord>){
+    const record=await this.requireRecord(id);await this.validateRecord({...this.normalizeRecord(record),...this.recordFields(body)});
+    return this.records.save({...record,...this.recordFields(body,false),seguimiento_estado:body.seguimiento_estado||record.seguimiento_estado||'Pendiente'});
+  }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Delete('api/records/:id') async deleteRecord(@Param('id') id: string) { const item = await this.records.findOneBy({ id: +id }); if (!item) throw new NotFoundException(); await this.records.delete(+id); return { ok: true }; }
+  private repo<T extends import('typeorm').ObjectLiteral>(entity:import('typeorm').EntityTarget<T>){return this.records.manager.connection.getRepository(entity);}
+  private numericId(value:string){if(!/^[1-9]\d*$/.test(value))throw new BadRequestException('Identificador no válido.');return Number(value);}
+  private async requireRecord(id:string){const record=await this.records.findOneBy({id:this.numericId(id)});if(!record)throw new NotFoundException();return record;}
+  private validDate(value:unknown){return typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;}
+  private text(value:unknown){return typeof value==='string'&&!!value.trim();}
+  private normalizeRecord(record:ClinicalRecord){return {...record,seguimiento_estado:record.seguimiento_estado||'Pendiente'};}
+  private recordFields(body:Partial<ClinicalRecord>,includePatient=true){
+    const result:any={};for(const column of this.records.metadata.columns){const key=column.propertyName;if(['id','imagenes','cita_id'].includes(key)||!includePatient&&key==='paciente_id')continue;if(body[key]!==undefined)result[key]=body[key];}return result;
+  }
+  private async validateRecord(body:Partial<ClinicalRecord>){
+    if(!Number.isInteger(Number(body.paciente_id))||!await this.patients.existsBy({id:Number(body.paciente_id)}))throw new BadRequestException('Selecciona un paciente existente.');
+    if(!this.validDate(body.fecha))throw new BadRequestException('Selecciona una fecha válida.');
+    if(body.fecha_seguimiento&&!this.validDate(body.fecha_seguimiento))throw new BadRequestException('Selecciona una fecha de seguimiento válida.');
+    if(body.seguimiento_estado!==undefined&&!['Pendiente','Realizado','Cancelado'].includes(body.seguimiento_estado))throw new BadRequestException('Estado de seguimiento no válido.');
+  }
+  private pick(body:any,keys:string[]){return Object.fromEntries(keys.filter(key=>body[key]!==undefined).map(key=>{if(typeof body[key]!=='string')throw new BadRequestException('Los campos deben contener texto.');return [key,body[key].trim()]}));}
+  private validateSigner(body:any){if(body.firmado!==true||!this.text(body.firmante))throw new BadRequestException('Indica quién firmó y adjunta la copia firmada.');}
+  private decodeFile(body:any,signed=true){
+    if(typeof body.type!=='string'||!(signed?/^(application\/pdf|image\/(jpeg|png|webp))$/:/^image\/(jpeg|png|webp|gif)$/).test(body.type)||typeof body.data!=='string')throw new BadRequestException('Formato de archivo no permitido.');
+    const data=body.data.replace(/^data:[^;]+;base64,/, '');
+    if(!/^[A-Za-z0-9+/]*={0,2}$/.test(data)||data.length%4!==0)throw new BadRequestException('Archivo base64 no válido.');
+    const buffer=Buffer.from(data,'base64');if(!buffer.length||buffer.length>(signed?10:5)*1024*1024)throw new BadRequestException('El archivo está vacío o supera el tamaño permitido.');
+    return {buffer,ext:body.type==='application/pdf'?'pdf':body.type.split('/')[1].replace('jpeg','jpg')};
+  }
+  private async withUpload<T>(group:string,id:string,body:any,persist:(path:string)=>Promise<T>){
+    const {buffer,ext}=this.decodeFile(body);const filename=`${randomUUID()}.${ext}`;const dir=join(PROJECT_ROOT,'uploads',group,String(this.numericId(id)));await mkdir(dir,{recursive:true});const path=join(dir,filename);
+    await writeFile(path,buffer,{flag:'wx'});try{return await persist(`/api/media/${group}/${id}/${filename}`);}catch(error){await unlink(path).catch(()=>{});throw error;}
+  }
+  private async activePublicationConsent(id:number){return this.repo(PublicationConsent).createQueryBuilder('c').where('c.case_id = :id AND c.revocado_en IS NULL AND TRIM(c.documento_firmado) <> :empty',{id,empty:''}).getExists();}
+
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Get('api/records/:id/treatments') async listTreatments(@Param('id') id:string){await this.requireRecord(id);return this.repo(DermatologyTreatment).findBy({record_id:+id});}
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/records/:id/treatments') async createTreatment(@Param('id') id:string,@Body() body:any){await this.requireRecord(id);return this.saveTreatment(id,body);}
+  private async saveTreatment(id:string,body:any,current?:DermatologyTreatment){
+    const values={...current,...this.pick(body,['producto','concentracion','presentacion','cantidad','via','frecuencia','duracion','indicaciones']),record_id:+id};if(!this.text(values.producto))throw new BadRequestException('Registra el producto indicado.');return this.repo(DermatologyTreatment).save(values);
+  }
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Patch('api/records/:id/treatments/:childId') async updateTreatment(@Param('id') id:string,@Param('childId') childId:string,@Body() body:any){const current=await this.repo(DermatologyTreatment).findOneBy({id:this.numericId(childId),record_id:this.numericId(id)});if(!current)throw new NotFoundException();return this.saveTreatment(id,body,current);}
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Delete('api/records/:id/treatments/:childId') async deleteTreatment(@Param('id') id:string,@Param('childId') childId:string){const result=await this.repo(DermatologyTreatment).delete({id:this.numericId(childId),record_id:this.numericId(id)});if(!result.affected)throw new NotFoundException();return {ok:true};}
+
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Get('api/records/:id/procedures') async listProcedures(@Param('id') id:string){await this.requireRecord(id);return this.repo(DermatologyProcedure).findBy({record_id:+id});}
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/records/:id/procedures') async createProcedure(@Param('id') id:string,@Body() body:any){await this.requireRecord(id);return this.saveProcedure(id,body);}
+  private async requireProcedure(id:string,procedureId:string){const p=await this.repo(DermatologyProcedure).findOneBy({id:this.numericId(procedureId),record_id:this.numericId(id)});if(!p)throw new NotFoundException();return p;}
+  private async saveProcedure(id:string,body:any,current?:DermatologyProcedure){
+    const values={estado:'Planificado',biopsia_estado:'No solicitada',...current,...this.pick(body,['tipo','fecha','zona','detalles','estado','biopsia_estado','biopsia_resultado','biopsia_resultado_fecha','comunicacion_fecha','comunicacion_destinatario','comunicacion_canal']),record_id:+id};
+    if(!this.text(values.tipo)||!this.validDate(values.fecha)||!['Planificado','Realizado','Cancelado'].includes(values.estado)||!['No solicitada','Solicitada','Resultado disponible','Comunicada'].includes(values.biopsia_estado))throw new BadRequestException('Revisa tipo, fecha y estados del procedimiento.');
+    if(['Resultado disponible','Comunicada'].includes(values.biopsia_estado)&&(!this.text(values.biopsia_resultado)||!this.validDate(values.biopsia_resultado_fecha)))throw new BadRequestException('Registra el resultado y su fecha.');
+    if(values.biopsia_estado==='Comunicada'&&(!this.validDate(values.comunicacion_fecha)||!this.text(values.comunicacion_destinatario)||!this.text(values.comunicacion_canal)))throw new BadRequestException('Registra fecha, destinatario y canal de comunicación.');
+    if(values.estado==='Realizado'){
+      const consents=current?await this.repo(ProcedureConsent).findBy({procedimiento_id:current.id,record_id:+id,fecha_confirmacion:values.fecha}):[];
+      if(!consents.some(c=>c.documento_firmado.trim()&&c.oportunidad_preguntas&&c.comprension_confirmada))throw new BadRequestException('Confirma el consentimiento firmado el día del procedimiento.');
+    }
+    return this.repo(DermatologyProcedure).save(values);
+  }
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Patch('api/records/:id/procedures/:procedureId') async updateProcedure(@Param('id') id:string,@Param('procedureId') procedureId:string,@Body() body:any){return this.saveProcedure(id,body,await this.requireProcedure(id,procedureId));}
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Delete('api/records/:id/procedures/:procedureId') async deleteProcedure(@Param('id') id:string,@Param('procedureId') procedureId:string){await this.requireProcedure(id,procedureId);await this.repo(DermatologyProcedure).delete(+procedureId);return {ok:true};}
+
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Get('api/records/:id/procedures/:procedureId/consents') async listProcedureConsents(@Param('id') id:string,@Param('procedureId') procedureId:string){await this.requireProcedure(id,procedureId);return this.repo(ProcedureConsent).findBy({record_id:+id,procedimiento_id:+procedureId});}
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/records/:id/procedures/:procedureId/consents') async createProcedureConsent(@Param('id') id:string,@Param('procedureId') procedureId:string,@Body() body:any,@Req() req:any){
+    await this.requireProcedure(id,procedureId);this.validateSigner(body);
+    const fields=this.pick(body,['firmante','identificacion_firmante','representante','fecha_conversacion','beneficios','riesgos','alternativas']);
+    if(!this.text(fields.identificacion_firmante)||!this.validDate(fields.fecha_conversacion)||!['beneficios','riesgos','alternativas'].every(k=>this.text(fields[k]))||body.oportunidad_preguntas!==true||body.comprension_confirmada!==true)throw new BadRequestException('Completa el registro de conversación y comprensión.');
+    return this.withUpload('procedure-consents',id,body,async documento_firmado=>this.repo(ProcedureConsent).save({...fields,record_id:+id,procedimiento_id:+procedureId,oportunidad_preguntas:true,comprension_confirmada:true,documento_firmado,registrado_por:req.user.sub} as ProcedureConsent));
+  }
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Patch('api/records/:id/procedures/:procedureId/consents/:consentId/confirm') async confirmProcedureConsent(@Param('id') id:string,@Param('procedureId') procedureId:string,@Param('consentId') consentId:string,@Body() body:any,@Req() req:any){
+    const p=await this.requireProcedure(id,procedureId);const consent=await this.repo(ProcedureConsent).findOneBy({id:this.numericId(consentId),record_id:+id,procedimiento_id:+procedureId});if(!consent)throw new NotFoundException();
+    if(!this.validDate(body.fecha_confirmacion)||body.fecha_confirmacion!==p.fecha||!consent.documento_firmado.trim())throw new BadRequestException('Confirma el consentimiento en la fecha del procedimiento.');
+    consent.fecha_confirmacion=body.fecha_confirmacion;consent.confirmado_por=req.user.sub;return this.repo(ProcedureConsent).save(consent);
+  }
+
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Get('api/records/:id/photos') async listPhotos(@Param('id') id:string){
+    const record=await this.requireRecord(id);const photos=await this.repo(ClinicalPhoto).findBy({record_id:+id});const known=new Set(photos.map(p=>p.ruta));
+    const legacy:string[]=JSON.parse(record.imagenes||'[]');return [...photos,...legacy.filter(path=>!known.has(path)).map(ruta=>({id:null,record_id:+id,ruta,vista:'Sin clasificar',zona:'',fecha_captura:record.fecha}))];
+  }
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/records/:id/photos') async uploadPhotos(@Param('id') id:string,@Body() body:any){
+    await this.requireRecord(id);
+    const consent=await this.photoConsents.createQueryBuilder('c').where('c.record_id = :id AND c.revocado_en IS NULL AND TRIM(c.documento_firmado) <> :empty',{id:+id,empty:''}).getExists();if(!consent)throw new BadRequestException('Registra primero el consentimiento firmado para fotografías clínicas.');
+    if(!Array.isArray(body.images)||!body.images.length||body.images.length>10)throw new BadRequestException('Selecciona entre una y diez fotografías.');
+    const prepared=body.images.map((image:any)=>{if(!['Panorámica','Comparación','Detalle'].includes(image.vista)||typeof image.zona!=='string'||!this.validDate(image.fecha_captura))throw new BadRequestException('Registra vista, zona y fecha de cada fotografía.');return {...image,...this.decodeFile(image,false)};});
+    const paths:string[]=[];try{
+      const dir=join(PROJECT_ROOT,'uploads','records',id);await mkdir(dir,{recursive:true});const rows:any[]=[];
+      for(const image of prepared){const filename=`${randomUUID()}.${image.ext}`;const path=join(dir,filename);await writeFile(path,image.buffer,{flag:'wx'});paths.push(path);rows.push({record_id:+id,ruta:`/api/media/records/${id}/${filename}`,vista:image.vista,zona:image.zona.trim(),fecha_captura:image.fecha_captura});}
+      return await this.records.manager.connection.transaction(async manager=>{const record=await manager.getRepository(ClinicalRecord).findOneByOrFail({id:+id});record.imagenes=JSON.stringify([...JSON.parse(record.imagenes||'[]'),...rows.map(r=>r.ruta)]);const saved=await manager.getRepository(ClinicalPhoto).save(rows);await manager.getRepository(ClinicalRecord).save(record);return saved;});
+    }catch(error){await Promise.all(paths.map(path=>unlink(path).catch(()=>{})));throw error;}
+  }
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Delete('api/records/:id/photos/:photoId') async deletePhoto(@Param('id') id:string,@Param('photoId') photoId:string){
+    const photo=await this.repo(ClinicalPhoto).findOneBy({id:this.numericId(photoId),record_id:this.numericId(id)});if(!photo)throw new NotFoundException();
+    await this.records.manager.connection.transaction(async manager=>{const record=await manager.getRepository(ClinicalRecord).findOneByOrFail({id:+id});record.imagenes=JSON.stringify(JSON.parse(record.imagenes||'[]').filter((path:string)=>path!==photo.ruta));await manager.getRepository(ClinicalRecord).save(record);await manager.getRepository(ClinicalPhoto).delete(photo.id);});
+    await unlink(join(PROJECT_ROOT,'uploads','records',id,photo.ruta.split('/').pop()!)).catch(()=>{});return {ok:true};
+  }
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Get('api/cases/:id/publication-consents') async listPublicationConsents(@Param('id') id:string){if(!await this.cases.existsBy({id:this.numericId(id)}))throw new NotFoundException();return this.repo(PublicationConsent).findBy({case_id:+id});}
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/cases/:id/publication-consents') async createPublicationConsent(@Param('id') id:string,@Body() body:any,@Req() req:any){
+    if(!await this.cases.existsBy({id:this.numericId(id)}))throw new NotFoundException();this.validateSigner(body);const fields=this.pick(body,['firmante','identificacion_firmante','representante']);
+    return this.withUpload('publication-consents',id,body,async documento_firmado=>this.repo(PublicationConsent).save({...fields,case_id:+id,documento_firmado,registrado_por:req.user.sub} as PublicationConsent));
+  }
+  @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Patch('api/cases/:id/publication-consents/:consentId/revoke') async revokePublicationConsent(@Param('id') id:string,@Param('consentId') consentId:string,@Req() req:any){
+    return this.records.manager.connection.transaction(async manager=>{const consent=await manager.getRepository(PublicationConsent).findOneBy({id:this.numericId(consentId),case_id:this.numericId(id)});if(!consent)throw new NotFoundException();if(!consent.revocado_en){consent.revocado_en=new Date();consent.revocado_por=req.user.sub;}await manager.getRepository(PublicationConsent).save(consent);await manager.getRepository(PublicCase).update(+id,{published:false});return consent;});
+  }
+
 }

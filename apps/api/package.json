@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node dist/main.js",
     "start:dev": "nest start --watch",
-    "build": "nest build"
+    "build": "nest build",
+    "test": "tsc -p tsconfig.json --incremental false && node --test --test-reporter=spec dist/workflows.spec.js"
   },
   "dependencies": {
     "@nestjs/common": "^12.1.3",
