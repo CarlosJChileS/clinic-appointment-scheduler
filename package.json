@@ -5,6 +5,12 @@
     "apps/api",
     "apps/web"
   ],
+  "overrides": {
+    "vite": "^8.3.4",
+    "@angular/build": {
+      "vite": "^8.3.4"
+    }
+  },
   "scripts": {
     "start:api": "npm run start:dev -w @clinic/api",
     "start:web": "npm start -w clinic-web",
