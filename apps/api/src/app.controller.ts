@@ -263,7 +263,7 @@ img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq
   }
   private async withUpload<T>(group:string,id:string,body:any,persist:(path:string)=>Promise<T>){
     const {buffer,ext}=this.decodeFile(body);const filename=`${randomUUID()}.${ext}`;const dir=join(PROJECT_ROOT,'uploads',group,String(this.numericId(id)));await mkdir(dir,{recursive:true});const path=join(dir,filename);
-    await writeFile(path,buffer,{flag:'wx'});try{return await persist(`/api/media/${group}/${id}/${filename}`);}catch(error){await unlink(path).catch(()=>{});throw error;}
+    try{await writeFile(path,buffer,{flag:'wx'});return await persist(`/api/media/${group}/${id}/${filename}`);}catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')await unlink(path).catch(()=>{});throw error;}
   }
   private async activePublicationConsent(id:number){return this.repo(PublicationConsent).createQueryBuilder('c').where('c.case_id = :id AND c.revocado_en IS NULL AND TRIM(c.documento_firmado) <> :empty',{id,empty:''}).getExists();}
 
@@ -279,8 +279,8 @@ img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/records/:id/procedures') async createProcedure(@Param('id') id:string,@Body() body:any){await this.requireRecord(id);return this.saveProcedure(id,body);}
   private async requireProcedure(id:string,procedureId:string){const p=await this.repo(DermatologyProcedure).findOneBy({id:this.numericId(procedureId),record_id:this.numericId(id)});if(!p)throw new NotFoundException();return p;}
   private async saveProcedure(id:string,body:any,current?:DermatologyProcedure){
-    const values={estado:'Planificado',biopsia_estado:'No solicitada',...current,...this.pick(body,['tipo','fecha','zona','detalles','estado','biopsia_estado','biopsia_resultado','biopsia_resultado_fecha','comunicacion_fecha','comunicacion_destinatario','comunicacion_canal']),record_id:+id};
-    if(current&&['tipo','fecha','zona','detalles'].some(key=>values[key]!==current[key])&&await this.repo(ProcedureConsent).createQueryBuilder('c').where('c.procedimiento_id = :procedureId AND c.record_id = :recordId AND TRIM(c.documento_firmado) <> :empty',{procedureId:current.id,recordId:+id,empty:''}).getExists())throw new BadRequestException('El consentimiento firmado fija el tipo, la fecha, la zona y los detalles. Registra un procedimiento nuevo para cambiar ese alcance.');
+    const changes=this.pick(body,['tipo','fecha','zona','detalles','estado','biopsia_estado','biopsia_resultado','biopsia_resultado_fecha','comunicacion_fecha','comunicacion_destinatario','comunicacion_canal']);
+    const values={estado:'Planificado',biopsia_estado:'No solicitada',...current,...changes,record_id:+id};
     if(!this.text(values.tipo)||!this.validDate(values.fecha)||!['Planificado','Realizado','Cancelado'].includes(values.estado)||!['No solicitada','Solicitada','Resultado disponible','Comunicada'].includes(values.biopsia_estado))throw new BadRequestException('Revisa tipo, fecha y estados del procedimiento.');
     if(['Resultado disponible','Comunicada'].includes(values.biopsia_estado)&&(!this.text(values.biopsia_resultado)||!this.validDate(values.biopsia_resultado_fecha)))throw new BadRequestException('Registra el resultado y su fecha.');
     if(values.biopsia_estado==='Comunicada'&&(!this.validDate(values.comunicacion_fecha)||!this.text(values.comunicacion_destinatario)||!this.text(values.comunicacion_canal)))throw new BadRequestException('Registra fecha, destinatario y canal de comunicación.');
@@ -288,17 +288,39 @@ img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq
       const consents=current?await this.repo(ProcedureConsent).findBy({procedimiento_id:current.id,record_id:+id,fecha_confirmacion:values.fecha}):[];
       if(!consents.some(c=>c.documento_firmado.trim()&&c.oportunidad_preguntas&&c.comprension_confirmada))throw new BadRequestException('Confirma el consentimiento firmado el día del procedimiento.');
     }
-    return this.repo(DermatologyProcedure).save(values);
+    if(!current)return this.repo(DermatologyProcedure).save(values);
+    if(!Object.keys(changes).length)return this.requireProcedure(id,String(current.id));
+    const query=this.repo(DermatologyProcedure).createQueryBuilder().update().set(changes).where('id = :procedureId AND record_id = :recordId',{procedureId:current.id,recordId:+id});
+    const scopeKeys=['tipo','fecha','zona','detalles'].filter(key=>changes[key]!==undefined);
+    if(scopeKeys.length){
+      const params=Object.fromEntries(scopeKeys.map((key,index)=>[`scope${index}`,changes[key]]));
+      const unchanged=scopeKeys.map((key,index)=>`"${key}" = :scope${index}`).join(' AND ');
+      query.andWhere(`(NOT EXISTS (SELECT 1 FROM consentimientos_procedimientos c WHERE c.procedimiento_id = :procedureId AND c.record_id = :recordId) OR (${unchanged}))`,params);
+    }
+    if(!(await query.execute()).affected)throw new BadRequestException('La solicitud de consentimiento fija el tipo, la fecha, la zona y los detalles. Registra un procedimiento nuevo para cambiar ese alcance.');
+    return this.requireProcedure(id,String(current.id));
   }
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Patch('api/records/:id/procedures/:procedureId') async updateProcedure(@Param('id') id:string,@Param('procedureId') procedureId:string,@Body() body:any){return this.saveProcedure(id,body,await this.requireProcedure(id,procedureId));}
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Delete('api/records/:id/procedures/:procedureId') async deleteProcedure(@Param('id') id:string,@Param('procedureId') procedureId:string){await this.requireProcedure(id,procedureId);await this.repo(DermatologyProcedure).delete(+procedureId);return {ok:true};}
 
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Get('api/records/:id/procedures/:procedureId/consents') async listProcedureConsents(@Param('id') id:string,@Param('procedureId') procedureId:string){await this.requireProcedure(id,procedureId);return this.repo(ProcedureConsent).findBy({record_id:+id,procedimiento_id:+procedureId});}
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Post('api/records/:id/procedures/:procedureId/consents') async createProcedureConsent(@Param('id') id:string,@Param('procedureId') procedureId:string,@Body() body:any,@Req() req:any){
-    await this.requireProcedure(id,procedureId);this.validateSigner(body);
+    const procedure=await this.requireProcedure(id,procedureId);this.validateSigner(body);
     const fields=this.pick(body,['firmante','identificacion_firmante','representante','fecha_conversacion','beneficios','riesgos','alternativas']);
     if(!this.text(fields.identificacion_firmante)||!this.validDate(fields.fecha_conversacion)||!['beneficios','riesgos','alternativas'].every(k=>this.text(fields[k]))||body.oportunidad_preguntas!==true||body.comprension_confirmada!==true)throw new BadRequestException('Completa el registro de conversación y comprensión.');
-    return this.withUpload('procedure-consents',id,body,async documento_firmado=>this.repo(ProcedureConsent).save({...fields,record_id:+id,procedimiento_id:+procedureId,oportunidad_preguntas:true,comprension_confirmada:true,documento_firmado,registrado_por:req.user.sub} as ProcedureConsent));
+    this.decodeFile(body);
+    const parameters=[+id,+procedureId,fields.firmante,fields.identificacion_firmante,fields.representante??'',fields.fecha_conversacion,fields.beneficios,fields.riesgos,fields.alternativas,1,1,'',req.user.sub];
+    const pending=await this.repo(ProcedureConsent).query(`INSERT INTO "consentimientos_procedimientos" (record_id,procedimiento_id,firmante,identificacion_firmante,representante,fecha_conversacion,beneficios,riesgos,alternativas,oportunidad_preguntas,comprension_confirmada,documento_firmado,registrado_por)
+      SELECT ${parameters.map(()=>'?').join(',')} FROM procedimientos_dermatologicos WHERE id = ? AND record_id = ? AND tipo = ? AND fecha = ? AND zona = ? AND detalles = ? RETURNING id`,[...parameters,procedure.id,+id,procedure.tipo,procedure.fecha,procedure.zona,procedure.detalles]);
+    if(!pending.length)throw new BadRequestException('El alcance del procedimiento cambió. Revisa sus datos antes de registrar el consentimiento.');
+    const consentId=Number(pending[0].id);
+    try{
+      return await this.withUpload('procedure-consents',id,body,async documento_firmado=>{
+        const result=await this.repo(ProcedureConsent).update({id:consentId,record_id:+id,procedimiento_id:+procedureId},{documento_firmado});
+        if(!result.affected)throw new BadRequestException('El procedimiento ya no está disponible.');
+        return this.repo(ProcedureConsent).findOneByOrFail({id:consentId});
+      });
+    }catch(error){await this.repo(ProcedureConsent).delete({id:consentId,documento_firmado:''});throw error;}
   }
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Patch('api/records/:id/procedures/:procedureId/consents/:consentId/confirm') async confirmProcedureConsent(@Param('id') id:string,@Param('procedureId') procedureId:string,@Param('consentId') consentId:string,@Body() body:any,@Req() req:any){
     const p=await this.requireProcedure(id,procedureId);const consent=await this.repo(ProcedureConsent).findOneBy({id:this.numericId(consentId),record_id:+id,procedimiento_id:+procedureId});if(!consent)throw new NotFoundException();

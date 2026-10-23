@@ -253,3 +253,60 @@ test('linked encounter prevents appointment deletion while unlinked appointments
  const saved=await db.getRepository(entities.ClinicalRecord).findOneByOrFail({id:linked.body.record.id});assert.equal(saved.cita_id,a.id);assert.equal(saved.paciente_id,patient.id);
  const unlinked=await appointment();assert.equal((await api(`appointments/${unlinked.id}`,'DELETE',undefined,secretary)).status,200);assert.equal(await db.getRepository(entities.Appointment).existsBy({id:unlinked.id}),false);
 });
+
+function gate(){let resolve!:()=>void;const promise=new Promise<void>(r=>resolve=r);return {promise,resolve};}
+const procedureConsent={...pdf,fecha_conversacion:'2026-10-22',beneficios:'Conversados',riesgos:'Conversados',alternativas:'Conversadas',oportunidad_preguntas:true,comprension_confirmada:true};
+
+test('first pending consent upload freezes procedure scope before its file finishes',{timeout:10000},async context=>{
+ const r=await record();const original={tipo:'Biopsia',fecha:'2026-10-23',zona:'Brazo',detalles:'Alcance original'};
+ const procedure=await api(`records/${r.id}/procedures`,'POST',original);const path=`records/${r.id}/procedures/${procedure.body.id}`;
+ const directory=join(PROJECT_ROOT,'uploads','procedure-consents',String(r.id));const written=gate(),resume=gate();const writeFile=fileSystem.writeFile;
+ context.mock.method(fileSystem,'writeFile',async(...args:any[])=>{await (writeFile as any)(...args);if(String(args[0]).startsWith(directory+require('path').sep)){written.resolve();await resume.promise;}});
+ const upload=api(path+'/consents','POST',procedureConsent);
+ try{
+  await written.promise;
+  const responses:number[]=[];for(const edit of [{tipo:'Otro'},{fecha:'2026-10-24'},{zona:'Cara'},{detalles:'Alcance diferente'}])responses.push((await api(path,'PATCH',edit)).status);
+  assert.deepEqual(responses,[400,400,400,400]);
+  const pending=await api(path+'/consents');assert.equal(pending.body.length,1);assert.equal(pending.body[0].documento_firmado,'');
+  assert.equal((await api(path+`/consents/${pending.body[0].id}/confirm`,'PATCH',{fecha_confirmacion:original.fecha})).status,400);
+  assert.equal((await api(path,'PATCH',{estado:'Realizado'})).status,400);
+  resume.resolve();const result=await upload;assert.equal(result.status,201);assert.ok(result.body.documento_firmado);
+  const saved=await db.getRepository(entities.DermatologyProcedure).findOneByOrFail({id:procedure.body.id});for(const key of Object.keys(original))assert.equal(saved[key],original[key]);
+ }finally{resume.resolve();await upload;context.mock.restoreAll();}
+});
+
+test('failed consent upload removes pending reservation and partial file without freezing edits',async context=>{
+ const r=await record();const procedure=await api(`records/${r.id}/procedures`,'POST',{tipo:'Biopsia',fecha:'2026-10-23',zona:'Brazo'});const path=`records/${r.id}/procedures/${procedure.body.id}`;
+ assert.equal((await api(path+'/consents','POST',{...procedureConsent,data:'invalid'})).status,400);assert.equal((await api(path+'/consents')).body.length,0);
+ const directory=join(PROJECT_ROOT,'uploads','procedure-consents',String(r.id));const previous=(await readdir(directory).catch(()=>[])).sort();const writeFile=fileSystem.writeFile;
+ context.mock.method(fileSystem,'writeFile',async(...args:any[])=>{await (writeFile as any)(...args);if(String(args[0]).startsWith(directory+require('path').sep))throw new Error('forced partial consent write failure');});
+ try{
+  assert.equal((await api(path+'/consents','POST',procedureConsent)).status,500);
+  assert.equal((await api(path+'/consents')).body.length,0);assert.deepEqual((await readdir(directory).catch(()=>[])).sort(),previous);
+  assert.equal((await api(path,'PATCH',{zona:'Cara'})).status,200);
+ }finally{context.mock.restoreAll();}
+});
+
+test('procedure edit already awaiting SQL cannot overtake the first consent reservation',{timeout:10000},async context=>{
+ const r=await record();const procedure=await api(`records/${r.id}/procedures`,'POST',{tipo:'Biopsia',fecha:'2026-10-23',zona:'Brazo'});const path=`records/${r.id}/procedures/${procedure.body.id}`;
+ const ready=gate(),resume=gate();const runner=db.createQueryRunner();const query=runner.query.bind(runner);let paused=false;
+ context.mock.method(runner,'query',async(...args:any[])=>{if(!paused&&String(args[0]).startsWith('UPDATE "procedimientos_dermatologicos"')){paused=true;ready.resolve();await resume.promise;}return (query as any)(...args);});
+ const edit=api(path,'PATCH',{tipo:'Otro procedimiento'});
+ try{
+  await ready.promise;const consent=await api(path+'/consents','POST',procedureConsent);assert.equal(consent.status,201);
+  resume.resolve();assert.equal((await edit).status,400);
+  assert.equal((await db.getRepository(entities.DermatologyProcedure).findOneByOrFail({id:procedure.body.id})).tipo,'Biopsia');
+ }finally{resume.resolve();await edit;context.mock.restoreAll();}
+});
+
+test('first consent reservation rejects a scope edit that commits before its insert',{timeout:10000},async context=>{
+ const r=await record();const procedure=await api(`records/${r.id}/procedures`,'POST',{tipo:'Biopsia',fecha:'2026-10-23',zona:'Brazo'});const path=`records/${r.id}/procedures/${procedure.body.id}`;
+ const ready=gate(),resume=gate();const runner=db.createQueryRunner();const query=runner.query.bind(runner);let paused=false;
+ context.mock.method(runner,'query',async(...args:any[])=>{if(!paused&&String(args[0]).startsWith('INSERT INTO "consentimientos_procedimientos"')){paused=true;ready.resolve();await resume.promise;}return (query as any)(...args);});
+ const upload=api(path+'/consents','POST',procedureConsent);
+ try{
+  await ready.promise;assert.equal((await api(path,'PATCH',{zona:'Cara'})).status,200);
+  resume.resolve();assert.equal((await upload).status,400);assert.equal((await api(path+'/consents')).body.length,0);
+  assert.equal((await db.getRepository(entities.DermatologyProcedure).findOneByOrFail({id:procedure.body.id})).zona,'Cara');
+ }finally{resume.resolve();await upload;context.mock.restoreAll();}
+});
