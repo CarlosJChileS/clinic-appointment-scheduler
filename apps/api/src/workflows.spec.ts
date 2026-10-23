@@ -14,6 +14,7 @@ import { unlink, mkdtemp, readdir, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PROJECT_ROOT } from './project-root';
+const fileSystem:typeof import('fs/promises')=require('fs/promises');
 const createdFiles=new Set<string>();
 
 let app:any, db:DataSource, base:string, doctor:string, secretary:string;
@@ -195,4 +196,60 @@ test('all exact photo views persist and the legacy upload cannot invent a classi
  const views=['Panorámica','Comparación','Detalle'];
  const saved=await api(`records/${r.id}/photos`,'POST',{images:views.map(vista=>({...photo,vista}))});
  assert.equal(saved.status,201);assert.deepEqual(saved.body.map((p:any)=>p.vista),views);
+});
+
+for(const confirmed of [false,true])test(`signed ${confirmed?'confirmed':'unconfirmed'} procedure consent freezes its clinical scope`,async()=>{
+ const r=await record();const original={tipo:'Biopsia',fecha:'2026-10-23',zona:'Brazo',detalles:'Sitio y alcance conversados'};
+ const procedure=await api(`records/${r.id}/procedures`,'POST',original);const path=`records/${r.id}/procedures/${procedure.body.id}`;
+ const consent=await api(path+'/consents','POST',{...pdf,fecha_conversacion:'2026-10-22',beneficios:'Conversados',riesgos:'Conversados',alternativas:'Conversadas',oportunidad_preguntas:true,comprension_confirmada:true});assert.equal(consent.status,201);
+ if(confirmed)assert.equal((await api(path+`/consents/${consent.body.id}/confirm`,'PATCH',{fecha_confirmacion:'2026-10-23'})).status,200);
+ const edits=[{tipo:'Otro procedimiento'},{fecha:'2026-10-24'},{zona:'Cara'},{detalles:'Alcance diferente'}];
+ const statuses:number[]=[];for(const edit of edits)statuses.push((await api(path,'PATCH',edit)).status);
+ assert.deepEqual(statuses,[400,400,400,400]);
+ const saved=await db.getRepository(entities.DermatologyProcedure).findOneByOrFail({id:procedure.body.id});
+ for(const key of ['tipo','fecha','zona','detalles'])assert.equal(saved[key],original[key]);
+ assert.equal((await api(path,'PATCH',{...original,estado:confirmed?'Realizado':'Planificado'})).status,200);
+ if(confirmed)assert.equal((await api(path,'PATCH',{tipo:'Otro procedimiento',zona:'Cara',estado:'Realizado'})).status,400);
+ assert.equal((await api(path,'PATCH',{estado:'Cancelado',biopsia_estado:'Solicitada'})).status,200);
+});
+
+test('photo consent revoked during file writing blocks persistence and cleans temporary files',{timeout:10000},async context=>{
+ const r=await record();const path=`records/${r.id}`;const consent=await api(path+'/photo-consents','POST',pdf);
+ const directory=join(PROJECT_ROOT,'uploads','records',String(r.id));const previous=(await readdir(directory).catch(()=>[])).sort();
+ const deferred=()=>{let resolve!:()=>void;const promise=new Promise<void>(r=>resolve=r);return {promise,resolve};};
+ const written=deferred(),resume=deferred();
+ const writeFile=fileSystem.writeFile;
+ context.mock.method(fileSystem,'writeFile',async(...args:any[])=>{
+  await (writeFile as any)(...args);
+  if(String(args[0]).startsWith(directory+require('path').sep)){written.resolve();await resume.promise;}
+ });
+ const upload=api(path+'/photos','POST',{images:[photo]});
+ try{
+  await written.promise;
+  assert.equal((await api(path+`/photo-consents/${consent.body.id}/revoke`,'PATCH')).status,200);
+  const savedConsent=await db.getRepository(entities.ClinicalPhotoConsent).findOneByOrFail({id:consent.body.id});assert.ok(savedConsent.revocado_en);
+  resume.resolve();const result=await upload;assert.equal(result.status,400);
+  assert.equal(await db.getRepository(entities.ClinicalPhoto).count(),0);
+  assert.equal((await db.getRepository(entities.ClinicalRecord).findOneByOrFail({id:r.id})).imagenes,'[]');
+  assert.deepEqual((await readdir(directory).catch(()=>[])).sort(),previous);
+ }finally{resume.resolve();await upload;context.mock.restoreAll();}
+});
+
+test('linked encounter prevents appointment patient reassignment and retains status workflows',async()=>{
+ const a=await appointment();await db.getRepository(entities.Appointment).update(a.id,{tipo_consulta:'Control',motivo_consulta:'Consulta',duracion_minutos:30});
+ const other=await db.getRepository(entities.Patient).save({nombre:'Otro',apellido:'Paciente',cedula:'OTHER'});
+ const linked=await api(`appointments/${a.id}/record`,'POST',{paciente_id:patient.id,fecha:'2026-10-23'});assert.equal(linked.status,201);
+ assert.equal((await api(`appointments/${a.id}`,'PATCH',{paciente_id:other.id})).status,400);
+ const saved=await db.getRepository(entities.Appointment).findOneByOrFail({id:a.id});assert.equal(saved.paciente_id,patient.id);
+ assert.equal((await db.getRepository(entities.ClinicalRecord).findOneByOrFail({id:linked.body.record.id})).paciente_id,patient.id);
+ assert.equal((await api(`appointments/${a.id}`,'PATCH',{estado:'Cancelada'},secretary)).status,200);
+ assert.equal((await api(`appointments/${a.id}`,'PATCH',{paciente_id:patient.id})).status,200);
+});
+
+test('linked encounter prevents appointment deletion while unlinked appointments remain deletable',async()=>{
+ const a=await appointment();const linked=await api(`appointments/${a.id}/record`,'POST',{paciente_id:patient.id,fecha:'2026-10-23'});assert.equal(linked.status,201);
+ assert.equal((await api(`appointments/${a.id}`,'DELETE',undefined,secretary)).status,400);
+ assert.equal((await db.getRepository(entities.Appointment).findOneByOrFail({id:a.id})).paciente_id,patient.id);
+ const saved=await db.getRepository(entities.ClinicalRecord).findOneByOrFail({id:linked.body.record.id});assert.equal(saved.cita_id,a.id);assert.equal(saved.paciente_id,patient.id);
+ const unlinked=await appointment();assert.equal((await api(`appointments/${unlinked.id}`,'DELETE',undefined,secretary)).status,200);assert.equal(await db.getRepository(entities.Appointment).existsBy({id:unlinked.id}),false);
 });

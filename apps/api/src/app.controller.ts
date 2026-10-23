@@ -185,8 +185,21 @@ img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq
     ]);
     return req.user.role==='doctor'?{appointments,records:records.map(record=>this.normalizeRecord(record))}:{appointments:appointments.map(({imagenes,...appointment})=>appointment)};
   }
-  @UseGuards(JwtGuard) @Patch('api/appointments/:id') async updateAppointment(@Param('id') id: string, @Body() body: Partial<Appointment>) { const current=await this.appointments.findOneBy({id:+id});if(!current)throw new NotFoundException();const merged={...current,...body};if(body.estado&&!['Programada','Atendida','Cancelada'].includes(body.estado))throw new BadRequestException('Estado de cita no válido.');if(body.paciente_id!==undefined||body.sucursal_id!==undefined||body.fecha!==undefined||body.hora!==undefined||body.estado==='Programada'||body.tipo_consulta!==undefined||body.tipo_consulta_otro!==undefined||body.motivo_consulta!==undefined||body.duracion_minutos!==undefined)await this.validateAppointment(merged,+id);return this.appointments.save({...current,...Object.fromEntries(['paciente_id','sucursal_id','fecha','hora','ubicacion','tipo_consulta','tipo_consulta_otro','motivo_consulta','duracion_minutos','descripcion','estado'].filter(key=>body[key]!==undefined).map(key=>[key,(key==='motivo_consulta'||key==='tipo_consulta_otro')&&typeof body[key]==='string'?body[key].trim():body[key]]))}); }
-  @UseGuards(JwtGuard) @Delete('api/appointments/:id') async deleteAppointment(@Param('id') id: string) { await this.appointments.delete(+id); return { ok: true }; }
+  @UseGuards(JwtGuard) @Patch('api/appointments/:id') async updateAppointment(@Param('id') id:string,@Body() body:Partial<Appointment>){
+    return this.records.manager.connection.transaction(async manager=>{
+      const appointments=manager.getRepository(Appointment);const current=await appointments.findOneBy({id:this.numericId(id)});if(!current)throw new NotFoundException();
+      if(body.paciente_id!==undefined&&Number(body.paciente_id)!==current.paciente_id&&await manager.getRepository(ClinicalRecord).existsBy({cita_id:current.id}))throw new BadRequestException('No puedes cambiar el paciente de una cita con evolución clínica vinculada.');
+      const merged={...current,...body};if(body.estado&&!['Programada','Atendida','Cancelada'].includes(body.estado))throw new BadRequestException('Estado de cita no válido.');
+      if(body.paciente_id!==undefined||body.sucursal_id!==undefined||body.fecha!==undefined||body.hora!==undefined||body.estado==='Programada'||body.tipo_consulta!==undefined||body.tipo_consulta_otro!==undefined||body.motivo_consulta!==undefined||body.duracion_minutos!==undefined)await this.validateAppointment(merged,+id);
+      return appointments.save({...current,...Object.fromEntries(['paciente_id','sucursal_id','fecha','hora','ubicacion','tipo_consulta','tipo_consulta_otro','motivo_consulta','duracion_minutos','descripcion','estado'].filter(key=>body[key]!==undefined).map(key=>[key,(key==='motivo_consulta'||key==='tipo_consulta_otro')&&typeof body[key]==='string'?body[key].trim():body[key]]))});
+    });
+  }
+  @UseGuards(JwtGuard) @Delete('api/appointments/:id') async deleteAppointment(@Param('id') id:string){
+    return this.records.manager.connection.transaction(async manager=>{
+      const cita_id=this.numericId(id);if(await manager.getRepository(ClinicalRecord).existsBy({cita_id}))throw new BadRequestException('No puedes eliminar una cita con evolución clínica vinculada. Puedes cambiar su estado.');
+      await manager.getRepository(Appointment).delete(cita_id);return {ok:true};
+    });
+  }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Get('api/records') async listRecords() { return (await this.records.find({ relations:{consentimientos_fotograficos:true},order: { fecha: 'DESC' } })).map(record=>this.normalizeRecord(record)); }
   @UseGuards(JwtGuard, RolesGuard) @Roles('doctor') @Post('api/records') async createRecord(@Body() body: Partial<ClinicalRecord>) {
     if(body.cita_id)return (await this.createLinkedRecord(String(body.cita_id),body)).record;
@@ -267,6 +280,7 @@ img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq
   private async requireProcedure(id:string,procedureId:string){const p=await this.repo(DermatologyProcedure).findOneBy({id:this.numericId(procedureId),record_id:this.numericId(id)});if(!p)throw new NotFoundException();return p;}
   private async saveProcedure(id:string,body:any,current?:DermatologyProcedure){
     const values={estado:'Planificado',biopsia_estado:'No solicitada',...current,...this.pick(body,['tipo','fecha','zona','detalles','estado','biopsia_estado','biopsia_resultado','biopsia_resultado_fecha','comunicacion_fecha','comunicacion_destinatario','comunicacion_canal']),record_id:+id};
+    if(current&&['tipo','fecha','zona','detalles'].some(key=>values[key]!==current[key])&&await this.repo(ProcedureConsent).createQueryBuilder('c').where('c.procedimiento_id = :procedureId AND c.record_id = :recordId AND TRIM(c.documento_firmado) <> :empty',{procedureId:current.id,recordId:+id,empty:''}).getExists())throw new BadRequestException('El consentimiento firmado fija el tipo, la fecha, la zona y los detalles. Registra un procedimiento nuevo para cambiar ese alcance.');
     if(!this.text(values.tipo)||!this.validDate(values.fecha)||!['Planificado','Realizado','Cancelado'].includes(values.estado)||!['No solicitada','Solicitada','Resultado disponible','Comunicada'].includes(values.biopsia_estado))throw new BadRequestException('Revisa tipo, fecha y estados del procedimiento.');
     if(['Resultado disponible','Comunicada'].includes(values.biopsia_estado)&&(!this.text(values.biopsia_resultado)||!this.validDate(values.biopsia_resultado_fecha)))throw new BadRequestException('Registra el resultado y su fecha.');
     if(values.biopsia_estado==='Comunicada'&&(!this.validDate(values.comunicacion_fecha)||!this.text(values.comunicacion_destinatario)||!this.text(values.comunicacion_canal)))throw new BadRequestException('Registra fecha, destinatario y canal de comunicación.');
@@ -304,7 +318,12 @@ img{max-width:100%}.hero>*,.editorial-gallery>*,.experience>*,.care-steps>*,.faq
     const paths:string[]=[];try{
       const dir=join(PROJECT_ROOT,'uploads','records',id);await mkdir(dir,{recursive:true});const rows:any[]=[];
       for(const image of prepared){const filename=`${randomUUID()}.${image.ext}`;const path=join(dir,filename);await writeFile(path,image.buffer,{flag:'wx'});paths.push(path);rows.push({record_id:+id,ruta:`/api/media/records/${id}/${filename}`,vista:image.vista,zona:image.zona.trim(),fecha_captura:image.fecha_captura});}
-      return await this.records.manager.connection.transaction(async manager=>{const record=await manager.getRepository(ClinicalRecord).findOneByOrFail({id:+id});record.imagenes=JSON.stringify([...JSON.parse(record.imagenes||'[]'),...rows.map(r=>r.ruta)]);const saved=await manager.getRepository(ClinicalPhoto).save(rows);await manager.getRepository(ClinicalRecord).save(record);return saved;});
+      return await this.records.manager.connection.transaction(async manager=>{
+        const record=await manager.getRepository(ClinicalRecord).findOneByOrFail({id:+id});record.imagenes=JSON.stringify([...JSON.parse(record.imagenes||'[]'),...rows.map(r=>r.ruta)]);
+        const activeConsent=await manager.getRepository(ClinicalPhotoConsent).createQueryBuilder('c').where('c.record_id = :id AND c.revocado_en IS NULL AND TRIM(c.documento_firmado) <> :empty',{id:+id,empty:''}).getExists();
+        if(!activeConsent)throw new BadRequestException('El consentimiento fotográfico ya no está vigente. No se guardaron las fotografías.');
+        const saved=await manager.getRepository(ClinicalPhoto).save(rows);await manager.getRepository(ClinicalRecord).save(record);return saved;
+      });
     }catch(error){await Promise.all(paths.map(path=>unlink(path).catch(()=>{})));throw error;}
   }
   @UseGuards(JwtGuard,RolesGuard) @Roles('doctor') @Delete('api/records/:id/photos/:photoId') async deletePhoto(@Param('id') id:string,@Param('photoId') photoId:string){
