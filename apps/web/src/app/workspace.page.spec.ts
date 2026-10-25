@@ -94,6 +94,46 @@ describe('WorkspacePage clinical workflows', () => {
     expect((page as any).selectedPhotoComparison(2)).toEqual([photo]);
   });
 
+  it('compares tagged and legacy photos across visits for the same patient with visit metadata', () => {
+    (page as any).records = [
+      { id: 2, paciente_id: 3, fecha: '2026-10-01', motivo_consulta: 'Primera visita' },
+      { id: 4, paciente_id: 3, fecha: '2026-10-23', motivo_consulta: 'Control' },
+      { id: 5, paciente_id: 9, fecha: '2026-10-23', motivo_consulta: 'Otra paciente' },
+    ];
+    (page as any).clinicalPhotos = {
+      2: [{ id: 8, record_id: 2, ruta: '/api/records/2/photos/8', vista: 'Comparación', zona: 'Mejilla derecha', fecha_captura: '2026-10-01', url: 'blob:one' }],
+      4: [{ id: null, record_id: 4, ruta: '/api/records/4/photos/legacy', vista: 'Sin clasificar', url: 'blob:legacy' }],
+      5: [{ id: 12, record_id: 5, ruta: '/api/records/5/photos/12', vista: 'Detalle', zona: 'Frente', fecha_captura: '2026-10-23', url: 'blob:other' }],
+    };
+
+    const patientPhotos = (page as any).patientPhotosForComparison(3);
+    expect(patientPhotos).toHaveLength(2);
+    expect(patientPhotos.map((photo: any) => photo.visitDate)).toEqual(['2026-10-01', '2026-10-23']);
+    expect(patientPhotos[1].vista).toBe('Sin clasificar');
+    (page as any).toggleLongitudinalPhoto(3, patientPhotos[1], true);
+    expect((page as any).selectedPatientPhotoComparison(3)).toEqual([patientPhotos[1]]);
+  });
+
+  it('loads private photos from every visit before showing the patient comparison', async () => {
+    const first = { id: 2, paciente_id: 3, fecha: '2026-10-01', motivo_consulta: 'Primera visita' } as any;
+    const current = { id: 4, paciente_id: 3, fecha: '2026-10-23', motivo_consulta: 'Control' } as any;
+    (page as any).records = [first, current];
+
+    const loading = page.selectClinicalRecord(current);
+    http.expectOne('/api/records/4/treatments').flush([]);
+    http.expectOne('/api/records/4/procedures').flush([]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    http.expectOne('/api/records/2/photos').flush([{ id: 8, record_id: 2, ruta: '/api/media/records/2/one.jpg', vista: 'Comparación', zona: 'Mejilla', fecha_captura: '2026-10-01' }]);
+    http.expectOne('/api/records/4/photos').flush([{ id: null, record_id: 4, ruta: '/api/media/records/4/legacy.jpg', vista: 'Sin clasificar', fecha_captura: '2026-10-23' }]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    http.expectOne('/api/media/records/2/one.jpg').flush(new Blob(['first photo']));
+    http.expectOne('/api/media/records/4/legacy.jpg').flush(new Blob(['legacy photo']));
+    await loading;
+
+    expect((page as any).patientPhotosForComparison(3)).toHaveLength(2);
+    expect((page as any).selectedClinicalRecord.id).toBe(4);
+  });
+
   it('saves structured treatment fields under the selected clinical record', () => {
     const record = { id: 2, paciente_id: 3, fecha: '2026-10-23', motivo_consulta: '', diagnostico_definitivo: '' } as any;
     page.treatmentForm.patchValue({ producto: 'Crema', concentracion: '2%', presentacion: 'Crema', cantidad: '30 g', via: 'Tópica', frecuencia: 'Noche', duracion: '14 días', indicaciones: 'Aplicar en zona indicada' });
@@ -124,6 +164,49 @@ describe('WorkspacePage clinical workflows', () => {
 
     expect(page.error).toContain('autorización específica firmada');
     http.expectNone('/api/cases/11');
+  });
+
+  it('publishes with the recorded consent and preserves publication state', () => {
+    const item = { id: 11, title: 'Caso', description: '', images: '[]', consent: false, published: false };
+    (page as any).publicationConsents = { 11: [{ id: 22, firmante: 'Ana Paz', documento_firmado: '/api/media/publication-consents/11/signed.pdf', revocado_en: null }] };
+
+    page.publishCase(item);
+
+    const request = http.expectOne('/api/cases/11');
+    expect(request.request.method).toBe('PATCH');
+    expect(request.request.body).toEqual({ published: true, consent: true });
+    request.flush({ ...item, consent: true, published: true });
+    expect(item.published).toBe(true);
+  });
+
+  it('clears treatment, procedure, and consent editor state when switching clinical records', async () => {
+    const record = { id: 2, paciente_id: 3, fecha: '2026-10-23', motivo_consulta: '', diagnostico_definitivo: '' } as any;
+    (page as any).editingTreatmentId = 90;
+    (page as any).editingProcedureId = 91;
+    (page as any).consentProcedure = { id: 92, fecha: '2026-10-22' };
+    (page as any).procedureConsentFile = new File(['signed'], 'signed.pdf', { type: 'application/pdf' });
+    (page as any).consentRecord = { id: 93 };
+    (page as any).consentFile = new File(['signed'], 'photo-consent.pdf', { type: 'application/pdf' });
+    page.treatmentForm.patchValue({ producto: 'Edición anterior' });
+    page.procedureForm.patchValue({ tipo: 'Procedimiento anterior' });
+    page.procedureConsentForm.patchValue({ firmante: 'Contexto anterior' });
+
+    const loading = page.selectClinicalRecord(record);
+    http.expectOne('/api/records/2/treatments').flush([]);
+    http.expectOne('/api/records/2/procedures').flush([]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    http.expectOne('/api/records/2/photos').flush([]);
+    await loading;
+
+    expect((page as any).editingTreatmentId).toBeNull();
+    expect((page as any).editingProcedureId).toBeNull();
+    expect((page as any).consentProcedure).toBeNull();
+    expect((page as any).procedureConsentFile).toBeNull();
+    expect((page as any).consentRecord).toBeNull();
+    expect((page as any).consentFile).toBeNull();
+    expect(page.treatmentForm.controls.producto.value).toBe('');
+    expect(page.procedureForm.controls.tipo.value).toBe('');
+    expect(page.procedureConsentForm.controls.firmante.value).toBe('');
   });
 
   it('sends view, site, and capture date with each clinical photo', async () => {
